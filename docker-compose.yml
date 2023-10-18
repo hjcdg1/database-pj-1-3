@@ -1,0 +1,8 @@
+version: '3'
+services:
+  database-project:
+    build: .
+    container_name: database-pj-1-3
+    volumes:
+      - .:/app
+    command: tail -f /dev/null
