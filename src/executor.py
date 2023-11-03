@@ -69,8 +69,90 @@ class SQLExecutor(Transformer):
         return parsed_type, parsed_value
 
     @classmethod
+    def parse_predicate(cls, tree):
+        """
+        Parse a `predicate` node and return the parsed result
+        The parsed result terminates the recursive chain of `parse_condition()` method (Role of leaf node)
+        """
+
+        # Binary operation
+        if tree.data == 'comparison_predicate':
+            operand1 = tree.children[0]
+            operand2 = tree.children[2]
+
+            return {
+                'leaf': True,
+                'operation': tree.children[1].children[0],
+                'operands': [
+                    {
+                        'type': 'value' if len(operand1.children) == 1 else 'column',
+                        'expr': (
+                            cls.parse_value(operand1.children[0].children[0])[1] if len(operand1.children) == 1 else
+                            '.'.join([child.children[0].lower() for child in filter(None, operand1.children)])
+                        )
+                    },
+                    {
+                        'type': 'value' if len(operand2.children) == 1 else 'column',
+                        'expr': (
+                            cls.parse_value(operand2.children[0].children[0])[1] if len(operand2.children) == 1 else
+                            '.'.join([child.children[0].lower() for child in filter(None, operand2.children)])
+                        )
+                    }
+                ]
+            }
+
+        # Unary operation
+        if tree.data == 'null_predicate':
+            return {
+                'leaf': True,
+                'operation': ' '.join([child.lower() for child in filter(None, tree.children[2].children)]),
+                'operands': [{
+                    'type': 'column',
+                    'expr': '.'.join([child.children[0].lower() for child in filter(None, tree.children[:2])])
+                }]
+            }
+
+    @classmethod
     def parse_condition(cls, tree):
-        return None
+        """
+        Parse a condition node recursively and return the parsed result
+        The recursion starts with a `boolean_expr` node
+        """
+
+        # Exclude `None` from the children
+        children = list(filter(None, tree.children))
+
+        # The leaf node terminating the recursive chain
+        if tree.data == 'predicate':
+            return cls.parse_predicate(tree.children[0])
+
+        # Before encountering a leaf node, repeat the below process recursively
+        else:
+            # If the number of the children is 1, just pass it down without any operation
+            # Only when `tree.data` is either `boolean_expr`, `boolean_term`, `boolean_factor`, or `boolean_test`
+            if len(children) == 1:
+                return cls.parse_condition(children[0])
+
+            if tree.data == 'boolean_expr':
+                return {
+                    'leaf': False,
+                    'operation': 'or',
+                    'operands': [cls.parse_condition(child) for child in children if isinstance(child, Tree)]
+                }
+            elif tree.data == 'boolean_term':
+                return {
+                    'leaf': False,
+                    'operation': 'and',
+                    'operands': [cls.parse_condition(child) for child in children if isinstance(child, Tree)]
+                }
+            elif tree.data == 'boolean_factor':
+                return {
+                    'leaf': False,
+                    'operation': 'not',
+                    'operands': [cls.parse_condition(children[1])]
+                }
+            elif tree.data == 'parenthesized_boolean_expr':
+                return cls.parse_condition(children[1])
 
     @classmethod
     def validate_condition(cls, condition, meta):
