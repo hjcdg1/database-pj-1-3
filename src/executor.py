@@ -405,7 +405,55 @@ class SQLExecutor(Transformer):
         print(f'{PROMPT_TEXT}> 1 row inserted')
 
     def delete_query(self, items):
-        pass
+        # Extract the table name
+        table_name = items[2].children[0].lower()
+
+        # Error: When the table does not exist
+        existing_table_name_set = set(self.db_manager.get_table_names())
+        if table_name not in existing_table_name_set:
+            raise exceptions.NoSuchTable
+
+        # Load the table and its columns/records
+        table = self.db_manager.get_table(table_name)
+        column_list = table['columns']
+        record_list = table['records']
+
+        # When 'WHERE' clause is specified
+        if items[4]:
+            # Preprocess the records (for identifying each column and deserializing the values into comparable values)
+            preprocessed_record_list = list(map(lambda record: {
+                f'{table_name}.{column["name"]}': self.deserialize_value(record[column['name']], column['type'])
+                for column in column_list
+            }, record_list))
+
+            # Metadata about available tables/columns
+            meta = {
+                'available_table_name_dict': {table_name: [column['name'] for column in column_list]},
+                'available_column_name_dict': {column['name']: [table_name] for column in column_list}
+            }
+
+            # Parse the condition specified in `WHERE` clause
+            condition = self.parse_condition(items[4])
+
+            # Validate the condition
+            self.validate_condition(condition, meta)
+
+            # Filter the records, based on the condition
+            new_record_list = [
+                record_list[idx]
+                for idx, record in enumerate(preprocessed_record_list)
+                if not self.filter_record(record, condition, meta)
+            ]
+
+        # Otherwise, delete all records
+        else:
+            new_record_list = []
+
+        # Delete the records from the table
+        table['records'] = new_record_list
+        self.db_manager.set_table(table_name, table)
+
+        print(f'{PROMPT_TEXT}> {len(record_list) - len(new_record_list)} row(s) deleted')
 
     def select_query(self, items):
         # Load the table names
