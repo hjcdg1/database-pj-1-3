@@ -26,6 +26,16 @@ The structure of the data stored in Berkeley DB is as follows.
 
 class SQLExecutor(Transformer):
     WIDTH_PADDING = 2
+    OPERATION_MAP = {
+        '=': '==',
+        '!=': '!=',
+        '>': '>',
+        '>=': '>=',
+        '<': '<',
+        '<=': '<=',
+        'is null': 'is None',
+        'is not null': 'is not None'
+    }  # Mapping SQL operations to Python operations
 
     def __init__(self, database):
         super().__init__()
@@ -253,8 +263,78 @@ class SQLExecutor(Transformer):
             return value
 
     @classmethod
+    def infer_data_type(cls, value):
+        """
+        Infer the SQL data type from a Python value (Assume it is not `None`)
+        """
+
+        if isinstance(value, int):
+            return 'int'
+        elif isinstance(value, str):
+            return 'char'
+        else:
+            return 'date'
+
+    @classmethod
     def filter_record(cls, record, condition, meta):
-        return True
+        """
+        Check if the record satisfies the condition recursively
+        The result is either `True`, `False`, or `None` (`None` means `Unknown`)
+        `meta` argument contains the metadata about available tables/columns
+        """
+
+        # The leaf node terminating the recursive chain
+        if condition['leaf']:
+            # Operation
+            operation = condition['operation']
+
+            # Operands
+            operands = []
+            for operand in condition['operands']:
+                # When the operand is a value
+                if operand['type'] == 'value':
+                    operands.append(operand['expr'])
+
+                # When the operand is a column
+                else:
+                    column_expr = operand['expr']
+
+                    # When the table name is not specified
+                    if '.' not in column_expr:
+                        column_name = operand['expr']
+                        table_name = meta['available_column_name_dict'][column_name][0]
+                        column_expr = f'{table_name}.{column_name}'
+
+                    operands.append(record[column_expr])
+
+            # Binary operation (Comparison)
+            if len(operands) == 2:
+                # Error: Comparison with `null` returns 'Unknown'
+                if operands[0] is None or operands[1] is None:
+                    return None
+
+                return eval(f'operands[0] {cls.OPERATION_MAP[operation]} operands[1]')
+
+            # Unary opeartion
+            else:
+                return eval(f'operands[0] {cls.OPERATION_MAP[operation]}')
+
+        # Before encountering a leaf node, repeat the below process recursively
+        else:
+            # OR
+            if condition['operation'] == 'or':
+                sub_result_set = {cls.filter_record(record, operand, meta) for operand in condition['operands']}
+                return True if True in sub_result_set else None if None in sub_result_set else False
+
+            # AND
+            if condition['operation'] == 'and':
+                sub_result_set = {cls.filter_record(record, operand, meta) for operand in condition['operands']}
+                return False if False in sub_result_set else None if None in sub_result_set else True
+
+            # NOT
+            if condition['operation'] == 'not':
+                sub_result = cls.filter_record(record, condition['operands'][0], meta)
+                return None if sub_result is None else not sub_result
 
     def create_table_query(self, items):
         # Extract the table name
