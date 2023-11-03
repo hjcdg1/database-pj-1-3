@@ -2,7 +2,7 @@ import itertools
 import re
 from datetime import datetime, date
 
-from lark import Transformer
+from lark import Transformer, Tree
 
 from src import exceptions
 from src.database import DatabaseManager
@@ -69,6 +69,14 @@ class SQLExecutor(Transformer):
         return parsed_type, parsed_value
 
     @classmethod
+    def parse_condition(cls, tree):
+        return None
+
+    @classmethod
+    def validate_condition(cls, condition, meta):
+        pass
+
+    @classmethod
     def serialize_value(cls, value):
         """
         Serialize a Python value (When storing in the database)
@@ -91,6 +99,10 @@ class SQLExecutor(Transformer):
             return datetime.strptime(value, '%Y-%m-%d').date()
         else:
             return value
+
+    @classmethod
+    def filter_record(cls, record, condition, meta):
+        return True
 
     def create_table_query(self, items):
         # Extract the table name
@@ -396,11 +408,6 @@ class SQLExecutor(Transformer):
         pass
 
     def select_query(self, items):
-        """
-        For project 1-3, here we assume only `select * from table_name` case.
-        (However, I implemented more than the requirement with project 1-3 in mind.)
-        """
-
         # Load the table names
         existing_table_name_set = set(self.db_manager.get_table_names())
 
@@ -451,8 +458,80 @@ class SQLExecutor(Transformer):
                 merged_record.update(record)
             merged_record_list.append(merged_record)
 
+        # Metadata about available tables/columns
+        meta = {
+            'available_table_name_dict': dict(),
+            'available_column_name_dict': dict()
+        }
+        for column_expr in column_expr_list:
+            table_name, column_name = column_expr.split('.')
+
+            if table_name not in meta['available_table_name_dict']:
+                meta['available_table_name_dict'][table_name] = []
+            meta['available_table_name_dict'][table_name].append(column_name)
+
+            if column_name not in meta['available_column_name_dict']:
+                meta['available_column_name_dict'][column_name] = []
+            meta['available_column_name_dict'][column_name].append(table_name)
+
+        # When 'WHERE' clause is specified
+        if items[5]:
+            # Parse the condition specified in `WHERE` clause
+            condition = self.parse_condition(items[5])
+
+            # Validate the condition
+            self.validate_condition(condition, meta)
+
+            # Filter the records, based on the condition
+            merged_record_list = [
+                record
+                for record in merged_record_list
+                if self.filter_record(record, condition, meta)
+            ]
+
         # Select the columns to display
-        selected_column_expr_list = column_expr_list  # Select all columns (*)
+        column_expr_as_list = list(items[1].find_data('column_expr'))
+        column_alias_dict = {}
+        if not column_expr_as_list:
+            selected_column_expr_list = column_expr_list  # Select all columns (*)
+        else:
+            selected_column_expr_list = []
+            for column_expr_as in column_expr_as_list:
+                # Extract the column expr/alias
+                column_expr = '.'.join([child.children[0].lower() for child in filter(None, column_expr_as.children[:2])])
+                column_alias = column_expr_as.children[3].children[0].lower() if column_expr_as.children[3] else None
+
+                # When the table name is specified
+                if '.' in column_expr:
+                    table_name, column_name = column_expr.split('.')
+
+                    # Error: When the referrenced table does not exist
+                    if table_name not in meta['available_table_name_dict']:
+                        raise exceptions.SelectColumnResolveError(column_expr)
+
+                    # Error: When the referrenced column does not exist
+                    if column_name not in meta['available_table_name_dict'][table_name]:
+                        raise exceptions.SelectColumnResolveError(column_expr)
+
+                    selected_column_expr_list.append(column_expr)
+
+                # When the table name is not specified
+                else:
+                    column_name = column_expr
+
+                    # Error: When the referrenced column does not exist
+                    if column_name not in meta['available_column_name_dict']:
+                        raise exceptions.SelectColumnResolveError(column_name)
+
+                    # Error: When the referrenced column is ambiguous
+                    table_name_list = meta['available_column_name_dict'][column_name]
+                    if len(table_name_list) > 1:
+                        raise exceptions.SelectColumnResolveError(column_name)
+
+                    selected_column_expr_list.append(f'{table_name_list[0]}.{column_name}')
+
+                if column_alias:
+                    column_alias_dict[selected_column_expr_list[-1]] = column_alias
 
         def get_display(value):
             """
@@ -469,7 +548,10 @@ class SQLExecutor(Transformer):
                 return value.strftime('%Y-%m-%d')
 
         # Set the width of each column (based on the longest value for each column)
-        width_list = [len(column_expr) + self.WIDTH_PADDING for column_expr in selected_column_expr_list]
+        width_list = [
+            len(column_alias_dict.get(column_expr, column_expr)) + self.WIDTH_PADDING
+            for column_expr in selected_column_expr_list
+        ]
         for record in merged_record_list:
             for idx, column_expr in enumerate(selected_column_expr_list):
                 width_list[idx] = max(width_list[idx], len(get_display(record[column_expr])) + self.WIDTH_PADDING)
@@ -478,7 +560,7 @@ class SQLExecutor(Transformer):
         dividing_line = '+' + '+'.join(['-' * width for width in width_list]) + '+'
         print(dividing_line)
         print('|' + '|'.join([
-            f'{f" {column_expr}":<{width_list[idx]}}'
+            f'{f" {column_alias_dict.get(column_expr, column_expr)}":<{width_list[idx]}}'
             for idx, column_expr in enumerate(selected_column_expr_list)
         ]) + '|')
         print(dividing_line)
