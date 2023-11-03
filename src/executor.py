@@ -156,7 +156,77 @@ class SQLExecutor(Transformer):
 
     @classmethod
     def validate_condition(cls, condition, meta):
-        pass
+        """
+        Check if the condition is valid recursively
+        `meta` argument contains the metadata about available tables/columns
+        """
+
+        # The leaf node terminating the recursive chain
+        if condition['leaf']:
+            # Operation
+            operation = condition['operation']
+
+            # Operand Types
+            # Note: Validation check for table/column reference is performed here
+            operand_types = []
+            for operand in condition['operands']:
+                # When the operand is a value
+                if operand['type'] == 'value':
+                    value = operand['expr']
+                    operand_types.append(cls.infer_data_type(value) if value is not None else 'null')
+
+                # When the operand is a column
+                else:
+                    column_expr = operand['expr']
+
+                    # When the table name is specified
+                    if '.' in column_expr:
+                        table_name, column_name = column_expr.split('.')
+
+                        # Error: When the referrenced table does not exist
+                        if table_name not in meta['available_table_name_dict']:
+                            raise exceptions.WhereTableNotSpecified
+
+                        # Error: When the referrenced column does not exist
+                        if column_name not in meta['available_table_name_dict'][table_name]:
+                            raise exceptions.WhereColumnNotExist
+
+                    # When the table name is not specified
+                    else:
+                        column_name = column_expr
+
+                        # Error: When the referrenced column does not exist
+                        if column_name not in meta['available_column_name_dict']:
+                            raise exceptions.WhereColumnNotExist
+
+                        # Error: When the referrenced column is ambiguous
+                        table_name_list = meta['available_column_name_dict'][column_name]
+                        if len(table_name_list) > 1:
+                            raise exceptions.WhereAmbiguousReference
+
+                        column_expr = f'{table_name_list[0]}.{column_name}'
+
+                    operand_types.append(meta['column_type_dict'][column_expr])
+
+            # Binary operation (Comparison)
+            # Note: This is pre-check for types, which is performed without knowing actual values
+            if len(operand_types) == 2:
+                # Error: Comparison with `null` is not allowed
+                if operand_types[0] == 'null' or operand_types[1] == 'null':
+                    raise exceptions.WhereIncomparableError
+
+                # Error: When the types of the two operands to compare does not match
+                if operand_types[0] != operand_types[1]:
+                    raise exceptions.WhereIncomparableError
+
+                # Error: Size comparison with `char` value is not allowed
+                if operand_types[0] == 'char' and operation not in ('=', '!='):
+                    raise exceptions.WhereIncomparableError
+
+        # Before encountering a leaf node, repeat the below process recursively
+        else:
+            for operand in condition['operands']:
+                cls.validate_condition(operand, meta)
 
     @classmethod
     def serialize_value(cls, value):
@@ -511,7 +581,8 @@ class SQLExecutor(Transformer):
             # Metadata about available tables/columns
             meta = {
                 'available_table_name_dict': {table_name: [column['name'] for column in column_list]},
-                'available_column_name_dict': {column['name']: [table_name] for column in column_list}
+                'available_column_name_dict': {column['name']: [table_name] for column in column_list},
+                'column_type_dict': {f'{table_name}.{column["name"]}': column['type'][:4] for column in column_list}
             }
 
             # Parse the condition specified in `WHERE` clause
@@ -543,6 +614,9 @@ class SQLExecutor(Transformer):
 
         # The set of table names, for detecting conflict in the table names
         table_name_set = set()
+
+        # Map column expression to column type
+        column_type_dict = dict()
 
         # Prepare the records for each table
         list_of_record_list = []
@@ -578,7 +652,10 @@ class SQLExecutor(Transformer):
             }, record_list))
             list_of_record_list.append(preprocessed_record_list)
 
-            column_expr_list.extend([f'{table_name}.{column["name"]}' for column in column_list])
+            for column in column_list:
+                column_expr = f'{table_name}.{column["name"]}'
+                column_expr_list.append(column_expr)
+                column_type_dict[column_expr] = column['type'][:4]
 
         # Merge all records into a table (Cartesian Product)
         merged_record_list = []
@@ -591,7 +668,8 @@ class SQLExecutor(Transformer):
         # Metadata about available tables/columns
         meta = {
             'available_table_name_dict': dict(),
-            'available_column_name_dict': dict()
+            'available_column_name_dict': dict(),
+            'column_type_dict': column_type_dict
         }
         for column_expr in column_expr_list:
             table_name, column_name = column_expr.split('.')
