@@ -321,13 +321,6 @@ class SQLExecutor(Transformer):
         self.explain_query(items)
 
     def insert_query(self, items):
-        """
-        For project 1-3, here we assume only simple cases as follows.
-        - The values in all columns are specified.
-        - Each specified values matches the corresponding column type.
-        - The value is not null if the corresponding column does not allow null.
-        """
-
         # Extract the table name
         table_name = items[2].children[0].lower()
 
@@ -346,19 +339,45 @@ class SQLExecutor(Transformer):
         else:
             column_name_list = [column_name.children[0].lower() for column_name in items[4].find_data('column_name')]
 
+            # Error: When some column does not exist
+            existing_column_name_set = {column['name'] for column in column_list}
+            for column_name in column_name_list:
+                if column_name not in existing_column_name_set:
+                    raise exceptions.InsertColumnExistenceError(column_name)
+
+            # Error: When there are duplicates in the column names
+            if len(set(column_name_list)) < len(column_name_list):
+                raise exceptions.EtcError
+
         # The column values that is specified
         column_value_list = [column_value.children[0] for column_value in items[8].find_data('column_value')]
+
+        # Error: When the number of the column names is different from the number of the column values
+        if len(column_name_list) != len(column_value_list):
+            raise exceptions.InsertTypeMismatchError
 
         # Construct the record to insert
         record = {}
         for column in column_list:
             column_name = column['name']
             column_type = column['type']
+            column_null = column['null']
 
-            column_value = column_value_list[column_name_list.index(column_name)]
+            if column_name not in column_name_list:
+                column_value = 'null'
+            else:
+                column_value = column_value_list[column_name_list.index(column_name)]
 
             # Parse the column value
             parsed_type, parsed_value = self.parse_value(column_value)
+
+            # Error: When the column value breaks the column's nullability
+            if not column_null and parsed_type == 'null':
+                raise exceptions.InsertColumnNonNullableError(column_name)
+
+            # Error: When the type of the column value is invalid
+            if parsed_type != 'null' and parsed_type != column_type[:4]:
+                raise exceptions.InsertTypeMismatchError
 
             # Truncate the `char(n)` value
             if parsed_type == 'char':
@@ -371,7 +390,7 @@ class SQLExecutor(Transformer):
         table['records'].append(record)
         self.db_manager.set_table(table_name, table)
 
-        print(f'{PROMPT_TEXT}> The row is inserted')
+        print(f'{PROMPT_TEXT}> 1 row inserted')
 
     def delete_query(self, items):
         pass
